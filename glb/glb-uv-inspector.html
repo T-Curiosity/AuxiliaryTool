@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GLB UV Inspector</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+            display: flex;
+            height: 100vh;
+        }
+        #viewer {
+            flex: 2;
+            position: relative;
+        }
+        #sidebar {
+            flex: 1;
+            background: #f0f0f0;
+            padding: 10px;
+            overflow-y: auto;
+            max-width: 400px;
+            min-width: 300px;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        #file-input {
+            display: block;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+        #mesh-list {
+            margin-bottom: 20px;
+        }
+        #mesh-info {
+            margin-bottom: 20px;
+        }
+        #uv-controls {
+            padding: 10px;
+            background: #e0e0e0;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .control-group {
+            margin-bottom: 10px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        button {
+            padding: 8px 12px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+        .uv-map-container {
+            width: 100%;
+            height: 200px;
+            border: 1px solid #ccc;
+            margin-top: 10px;
+            position: relative;
+            background-color: #fff;
+        }
+        #uv-map-canvas {
+            width: 100%;
+            height: 100%;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            display: none;
+            z-index: 100;
+        }
+        .texture-preview {
+            max-width: 100%;
+            max-height: 150px;
+            margin-top: 10px;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+    <div id="viewer"></div>
+    <div id="sidebar">
+        <h2>GLB UV Inspector</h2>
+        <input type="file" id="file-input" accept=".glb,.gltf">
+        
+        <div id="mesh-list">
+            <h3>模型网格列表</h3>
+            <select id="mesh-select" size="6" style="width: 100%">
+                <option value="">-- 请先加载GLB文件 --</option>
+            </select>
+        </div>
+        
+        <div id="mesh-info">
+            <h3>网格信息</h3>
+            <div id="mesh-details">
+                请选择一个网格来查看详情
+            </div>
+            <div id="uv-bounds-info"></div>
+            <div class="uv-map-container">
+                <canvas id="uv-map-canvas"></canvas>
+            </div>
+            <div id="texture-preview"></div>
+            <div id="uv-data-display">
+                <h4>UV坐标数据</h4>
+                <div id="uv-coordinates" style="max-height: 150px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 10px; border: 1px solid #ddd; padding: 5px;">
+                    请选择一个网格查看UV坐标
+                </div>
+            </div>
+        </div>
+        
+        <div id="uv-controls">
+            <h3>UV控制</h3>
+            <div class="control-group">
+                <label for="uv-offset-u">U偏移:</label>
+                <input type="range" id="uv-offset-u" min="-1" max="1" step="0.01" value="0">
+                <span id="uv-offset-u-value">0</span>
+            </div>
+            <div class="control-group">
+                <label for="uv-offset-v">V偏移:</label>
+                <input type="range" id="uv-offset-v" min="-1" max="1" step="0.01" value="0">
+                <span id="uv-offset-v-value">0</span>
+            </div>
+            <div class="control-group">
+                <label for="uv-scale-u">U缩放:</label>
+                <input type="range" id="uv-scale-u" min="0.1" max="5" step="0.1" value="1">
+                <span id="uv-scale-u-value">1</span>
+            </div>
+            <div class="control-group">
+                <label for="uv-scale-v">V缩放:</label>
+                <input type="range" id="uv-scale-v" min="0.1" max="5" step="0.1" value="1">
+                <span id="uv-scale-v-value">1</span>
+            </div>
+            <button id="reset-uv">重置UV</button>
+            <button id="apply-to-all">应用到所有网格</button>
+        </div>
+    </div>
+    
+    <div id="loading">加载中...</div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // Variables
+        let scene, camera, renderer, controls;
+        let model, activeMesh, originalMeshes = [];
+        let textureLoader = new THREE.TextureLoader();
+        let currentMeshName = '';
+
+        // Get DOM elements
+        const fileInput = document.getElementById('file-input');
+        const meshSelect = document.getElementById('mesh-select');
+        const meshDetails = document.getElementById('mesh-details');
+        const uvOffsetU = document.getElementById('uv-offset-u');
+        const uvOffsetV = document.getElementById('uv-offset-v');
+        const uvScaleU = document.getElementById('uv-scale-u');
+        const uvScaleV = document.getElementById('uv-scale-v');
+        const uvOffsetUValue = document.getElementById('uv-offset-u-value');
+        const uvOffsetVValue = document.getElementById('uv-offset-v-value');
+        const uvScaleUValue = document.getElementById('uv-scale-u-value');
+        const uvScaleVValue = document.getElementById('uv-scale-v-value');
+        const resetUVBtn = document.getElementById('reset-uv');
+        const applyToAllBtn = document.getElementById('apply-to-all');
+        const loadingIndicator = document.getElementById('loading');
+        const uvMapCanvas = document.getElementById('uv-map-canvas');
+        const texturePreview = document.getElementById('texture-preview');
+        
+        // UV map drawing context
+        const uvCtx = uvMapCanvas.getContext('2d');
+
+        // Init Three.js
+        function init() {
+            // Create scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333);
+
+            // Create camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / 2 / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth / 2, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.getElementById('viewer').appendChild(renderer.domElement);
+
+            // Add ambient light
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            // Add directional light
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+
+            // Add controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // Handle window resize
+            window.addEventListener('resize', onWindowResize);
+
+            // Set up event listeners
+            setupEventListeners();
+
+            // Start render loop
+            animate();
+        }
+
+        function setupEventListeners() {
+            fileInput.addEventListener('change', handleFileUpload);
+            meshSelect.addEventListener('change', handleMeshSelect);
+            
+            // UV Controls event listeners
+            uvOffsetU.addEventListener('input', updateUVOffsetLabel);
+            uvOffsetV.addEventListener('input', updateUVOffsetLabel);
+            uvScaleU.addEventListener('input', updateUVScaleLabel);
+            uvScaleV.addEventListener('input', updateUVScaleLabel);
+            
+            resetUVBtn.addEventListener('click', resetUVControls);
+            applyToAllBtn.addEventListener('click', applyUVToAllMeshes);
+
+            // Apply UV changes when sliders are adjusted
+            [uvOffsetU, uvOffsetV, uvScaleU, uvScaleV].forEach(el => {
+                el.addEventListener('input', applyUVOffset);
+            });
+        }
+
+        function updateUVOffsetLabel() {
+            uvOffsetUValue.textContent = uvOffsetU.value;
+            uvOffsetVValue.textContent = uvOffsetV.value;
+        }
+
+        function updateUVScaleLabel() {
+            uvScaleUValue.textContent = uvScaleU.value;
+            uvScaleVValue.textContent = uvScaleV.value;
+        }
+
+        function resetUVControls() {
+            uvOffsetU.value = 0;
+            uvOffsetV.value = 0;
+            uvScaleU.value = 1;
+            uvScaleV.value = 1;
+            updateUVOffsetLabel();
+            updateUVScaleLabel();
+            
+            if (activeMesh) {
+                resetMeshUV(activeMesh);
+                drawUVMap(activeMesh);
+            }
+        }
+
+        function resetMeshUV(mesh) {
+            // Find original mesh data
+            const originalMesh = originalMeshes.find(m => m.name === mesh.name);
+            if (originalMesh && originalMesh.geometry) {
+                // Clone the original UV attribute
+                const originalUVs = originalMesh.geometry.attributes.uv.array.slice();
+                
+                // Replace current UVs with original ones
+                mesh.geometry.attributes.uv.array.set(originalUVs);
+                mesh.geometry.attributes.uv.needsUpdate = true;
+            }
+        }
+
+        function applyUVToAllMeshes() {
+            const uOffset = parseFloat(uvOffsetU.value);
+            const vOffset = parseFloat(uvOffsetV.value);
+            const uScale = parseFloat(uvScaleU.value);
+            const vScale = parseFloat(uvScaleV.value);
+
+            if (model) {
+                model.traverse(node => {
+                    if (node.isMesh && node.geometry && node.geometry.attributes.uv) {
+                        applyUVTransform(node, uOffset, vOffset, uScale, vScale);
+                    }
+                });
+            }
+        }
+
+        function applyUVOffset() {
+            if (!activeMesh) return;
+            
+            const uOffset = parseFloat(uvOffsetU.value);
+            const vOffset = parseFloat(uvOffsetV.value);
+            const uScale = parseFloat(uvScaleU.value);
+            const vScale = parseFloat(uvScaleV.value);
+            
+            applyUVTransform(activeMesh, uOffset, vOffset, uScale, vScale);
+            drawUVMap(activeMesh);
+        }
+
+        function applyUVTransform(mesh, uOffset, vOffset, uScale, vScale) {
+            if (!mesh.geometry || !mesh.geometry.attributes.uv) return;
+            
+            // Find original mesh data
+            const originalMesh = originalMeshes.find(m => m.name === mesh.name);
+            if (!originalMesh || !originalMesh.geometry) return;
+            
+            // Get original UV coordinates
+            const originalUVs = originalMesh.geometry.attributes.uv.array;
+            const uvs = mesh.geometry.attributes.uv.array;
+            
+            // Apply transform to each UV coordinate
+            for (let i = 0; i < uvs.length; i += 2) {
+                // Get original UV
+                const originalU = originalUVs[i];
+                const originalV = originalUVs[i + 1];
+                
+                // Apply scale and offset
+                uvs[i] = originalU * uScale + uOffset;
+                uvs[i + 1] = originalV * vScale + vOffset;
+            }
+            
+            mesh.geometry.attributes.uv.needsUpdate = true;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / 2 / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth / 2, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            showLoading(true);
+            
+            // Clear previous model
+            if (model) {
+                scene.remove(model);
+                model = null;
+            }
+            
+            // Reset mesh selection
+            meshSelect.innerHTML = '';
+            meshDetails.innerHTML = '加载中...';
+            originalMeshes = [];
+            
+            // Load the GLB file
+            const loader = new GLTFLoader();
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                const arrayBuffer = e.target.result;
+                
+                loader.parse(arrayBuffer, '', function(gltf) {
+                    model = gltf.scene;
+                    scene.add(model);
+                    
+                    // Center and scale the model
+                    const box = new THREE.Box3().setFromObject(model);
+                    const size = box.getSize(new THREE.Vector3());
+                    const center = box.getCenter(new THREE.Vector3());
+                    
+                    const maxDim = Math.max(size.x, size.y, size.z);
+                    const scale = 5 / maxDim;
+                    model.scale.set(scale, scale, scale);
+                    
+                    model.position.x = -center.x * scale;
+                    model.position.y = -center.y * scale;
+                    model.position.z = -center.z * scale;
+                    
+                    // Populate mesh list
+                    populateMeshList(model);
+                    
+                    showLoading(false);
+                }, function(error) {
+                    console.error('Error loading GLB file:', error);
+                    showLoading(false);
+                    meshDetails.innerHTML = '加载失败: ' + error.message;
+                });
+            };
+            
+            reader.readAsArrayBuffer(file);
+        }
+
+        function populateMeshList(model) {
+            meshSelect.innerHTML = '';
+            let index = 0;
+            
+            model.traverse(node => {
+                if (node.isMesh) {
+                    const option = document.createElement('option');
+                    option.value = node.name || 'Mesh_' + index;
+                    option.textContent = node.name || 'Mesh_' + index;
+                    meshSelect.appendChild(option);
+                    
+                    // Store original mesh data for resetting
+                    const clonedGeometry = node.geometry.clone();
+                    originalMeshes.push({
+                        name: node.name || 'Mesh_' + index,
+                        geometry: clonedGeometry
+                    });
+                    
+                    index++;
+                }
+            });
+            
+            if (index > 0) {
+                meshDetails.innerHTML = '请选择一个网格来查看UV信息';
+            } else {
+                meshDetails.innerHTML = '没有找到网格数据';
+            }
+        }
+
+        function handleMeshSelect(event) {
+            const meshName = event.target.value;
+            if (!meshName) return;
+            
+            currentMeshName = meshName;
+            
+            model.traverse(node => {
+                // Reset highlight color for all meshes
+                if (node.isMesh && node.material) {
+                    if (node.originalMaterial) {
+                        node.material = node.originalMaterial;
+                    }
+                }
+                
+                // Highlight selected mesh
+                if (node.isMesh && (node.name === meshName)) {
+                    activeMesh = node;
+                    
+                    // Store original material if not already stored
+                    if (!node.originalMaterial) {
+                        node.originalMaterial = node.material.clone();
+                    }
+                    
+                    // Create highlighted material
+                    const highlightMaterial = node.originalMaterial.clone();
+                    if (highlightMaterial.color) {
+                        highlightMaterial.color.set(0x00ff00);
+                    }
+                    highlightMaterial.emissive = new THREE.Color(0x444444);
+                    node.material = highlightMaterial;
+                    
+                    // Display mesh info
+                    displayMeshInfo(node);
+                }
+            });
+            
+            // Reset UV controls
+            resetUVControls();
+        }
+
+        function displayMeshInfo(mesh) {
+            if (!mesh.geometry) {
+                meshDetails.innerHTML = '无法获取网格信息';
+                return;
+            }
+            
+            const geometry = mesh.geometry;
+            const material = mesh.originalMaterial || mesh.material;
+            
+            // Get vertex count
+            const vertices = geometry.attributes.position ? geometry.attributes.position.count : 0;
+            
+            // Get face count
+            const faces = geometry.index ? geometry.index.count / 3 : vertices / 3;
+            
+            // Check if UV coordinates are available
+            const hasUV = geometry.attributes.uv !== undefined;
+            
+            // Build info HTML
+            let infoHTML = `
+                <p><strong>名称:</strong> ${mesh.name}</p>
+                <p><strong>顶点数:</strong> ${vertices}</p>
+                <p><strong>面数:</strong> ${Math.floor(faces)}</p>
+                <p><strong>UV数据:</strong> ${hasUV ? '可用' : '不可用'}</p>
+            `;
+            
+            // Material info
+            if (material) {
+                infoHTML += `<p><strong>材质:</strong> ${material.name || 'Unnamed'}</p>`;
+                if (material.map) {
+                    infoHTML += `<p><strong>纹理:</strong> 可用</p>`;
+                    
+                    // Show texture preview
+                    if (material.map.image) {
+                        const imgElement = document.createElement('img');
+                        imgElement.src = material.map.image.src;
+                        imgElement.className = 'texture-preview';
+                        
+                        texturePreview.innerHTML = '';
+                        texturePreview.appendChild(imgElement);
+                    }
+                } else {
+                    infoHTML += `<p><strong>纹理:</strong> 不可用</p>`;
+                    texturePreview.innerHTML = '';
+                }
+            }
+            
+            meshDetails.innerHTML = infoHTML;
+            
+            // Draw UV map
+            if (hasUV) {
+                drawUVMap(mesh);
+                displayUVData(mesh);
+            } else {
+                clearUVMap();
+                document.getElementById('uv-coordinates').innerHTML = '该网格没有UV数据';
+            }
+        }
+        
+        function displayUVData(mesh) {
+            if (!mesh.geometry || !mesh.geometry.attributes.uv) {
+                document.getElementById('uv-coordinates').innerHTML = '该网格没有UV数据';
+                return;
+            }
+            
+            const uvs = mesh.geometry.attributes.uv;
+            let uvDataHTML = '<table style="width:100%; border-collapse: collapse;">';
+            uvDataHTML += '<tr><th style="border: 1px solid #ddd; padding: 4px;">顶点</th><th style="border: 1px solid #ddd; padding: 4px;">U</th><th style="border: 1px solid #ddd; padding: 4px;">V</th></tr>';
+            
+            // 只显示前30个点，避免过多数据
+            const displayCount = Math.min(30, uvs.count);
+            
+            for (let i = 0; i < displayCount; i++) {
+                const u = uvs.getX(i);
+                const v = uvs.getY(i);
+                
+                uvDataHTML += `
+                    <tr>
+                        <td style="border: 1px solid #ddd; padding: 4px;">${i}</td>
+                        <td style="border: 1px solid #ddd; padding: 4px;">${u.toFixed(4)}</td>
+                        <td style="border: 1px solid #ddd; padding: 4px;">${v.toFixed(4)}</td>
+                    </tr>
+                `;
+            }
+            
+            if (uvs.count > displayCount) {
+                uvDataHTML += `<tr><td colspan="3" style="text-align: center; padding: 4px;">...共 ${uvs.count} 个点</td></tr>`;
+            }
+            
+            uvDataHTML += '</table>';
+            document.getElementById('uv-coordinates').innerHTML = uvDataHTML;
+        }
+
+        function drawUVMap(mesh) {
+            const uvCanvas = document.getElementById('uv-map-canvas');
+            const ctx = uvCanvas.getContext('2d');
+            
+            // Set canvas size
+            const width = uvCanvas.clientWidth;
+            const height = uvCanvas.clientHeight;
+            uvCanvas.width = width;
+            uvCanvas.height = height;
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, width, height);
+            
+            // Draw grid background
+            drawUVGrid(ctx, width, height);
+            
+            if (!mesh.geometry || !mesh.geometry.attributes.uv) return;
+            
+            const uvs = mesh.geometry.attributes.uv;
+            const indices = mesh.geometry.index;
+            
+            // Calculate UV bounding box
+            let minU = Infinity, minV = Infinity;
+            let maxU = -Infinity, maxV = -Infinity;
+            
+            for (let i = 0; i < uvs.count; i++) {
+                const u = uvs.getX(i);
+                const v = uvs.getY(i);
+                
+                minU = Math.min(minU, u);
+                minV = Math.min(minV, v);
+                maxU = Math.max(maxU, u);
+                maxV = Math.max(maxV, v);
+            }
+            
+            // Update UV bounds info in a separate container
+            const uvBoundsElement = document.getElementById('uv-bounds-info');
+            if (uvBoundsElement) {
+                uvBoundsElement.innerHTML = `
+                    <div style="padding: 5px; background: #f5f5f5; border: 1px solid #ddd; margin-bottom: 10px;">
+                        <p><strong>UV边界:</strong></p>
+                        <p>U范围: ${minU.toFixed(4)} 到 ${maxU.toFixed(4)}</p>
+                        <p>V范围: ${minV.toFixed(4)} 到 ${maxV.toFixed(4)}</p>
+                        <p>宽度: ${(maxU - minU).toFixed(4)}</p>
+                        <p>高度: ${(maxV - minV).toFixed(4)}</p>
+                    </div>
+                `;
+            }
+            
+            // Draw UV points
+            ctx.fillStyle = 'rgba(0, 128, 255, 0.6)';
+            
+            for (let i = 0; i < uvs.count; i++) {
+                const u = uvs.getX(i);
+                const v = 1 - uvs.getY(i); // Flip V to match canvas coordinates
+                
+                const x = u * width;
+                const y = v * height;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            // Draw UV faces if indices are available
+            if (indices) {
+                ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+                ctx.lineWidth = 0.5;
+                
+                for (let i = 0; i < indices.count; i += 3) {
+                    const idx1 = indices.getX(i);
+                    const idx2 = indices.getX(i + 1);
+                    const idx3 = indices.getX(i + 2);
+                    
+                    const u1 = uvs.getX(idx1) * width;
+                    const v1 = (1 - uvs.getY(idx1)) * height;
+                    const u2 = uvs.getX(idx2) * width;
+                    const v2 = (1 - uvs.getY(idx2)) * height;
+                    const u3 = uvs.getX(idx3) * width;
+                    const v3 = (1 - uvs.getY(idx3)) * height;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(u1, v1);
+                    ctx.lineTo(u2, v2);
+                    ctx.lineTo(u3, v3);
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+            }
+            
+            // Draw standard UV bounds (0-1 square)
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(0, 0, width, height);
+            
+            // Draw actual UV bounding box
+            ctx.strokeStyle = 'blue';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(
+                minU * width,
+                (1 - maxV) * height,
+                (maxU - minU) * width,
+                (maxV - minV) * height
+            );
+            
+            // Label UV corners
+            ctx.fillStyle = 'black';
+            ctx.font = '12px Arial';
+            ctx.fillText('(0,0)', 5, height - 5);
+            ctx.fillText('(1,0)', width - 30, height - 5);
+            ctx.fillText('(0,1)', 5, 15);
+            ctx.fillText('(1,1)', width - 30, 15);
+            
+            // Label actual UV bounds
+            ctx.fillStyle = 'blue';
+            ctx.fillText(`(${minU.toFixed(2)},${minV.toFixed(2)})`, minU * width + 5, (1 - minV) * height - 5);
+            ctx.fillText(`(${maxU.toFixed(2)},${maxV.toFixed(2)})`, maxU * width - 50, (1 - maxV) * height + 15);
+        }
+
+        function drawUVGrid(ctx, width, height) {
+            ctx.strokeStyle = 'rgba(200, 200, 200, 0.3)';
+            ctx.lineWidth = 0.5;
+            
+            // Draw grid lines
+            const gridSize = 10;
+            const cellWidth = width / gridSize;
+            const cellHeight = height / gridSize;
+            
+            // Vertical lines
+            for (let i = 1; i < gridSize; i++) {
+                const x = i * cellWidth;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+            }
+            
+            // Horizontal lines
+            for (let i = 1; i < gridSize; i++) {
+                const y = i * cellHeight;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+        }
+
+        function clearUVMap() {
+            const uvCanvas = document.getElementById('uv-map-canvas');
+            const ctx = uvCanvas.getContext('2d');
+            
+            // Set canvas size
+            const width = uvCanvas.clientWidth;
+            const height = uvCanvas.clientHeight;
+            uvCanvas.width = width;
+            uvCanvas.height = height;
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, width, height);
+            
+            // Draw empty grid
+            drawUVGrid(ctx, width, height);
+            
+            // Draw UV bounds
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(0, 0, width, height);
+            
+            // Show "No UV data" message
+            ctx.fillStyle = 'black';
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('无UV数据', width / 2, height / 2);
+            
+            // Clear UV bounds info
+            const uvBoundsElement = document.getElementById('uv-bounds-info');
+            if (uvBoundsElement) {
+                uvBoundsElement.innerHTML = '';
+            }
+        }
+
+        function showLoading(show) {
+            loadingIndicator.style.display = show ? 'block' : 'none';
+        }
+
+        // Initialize the application
+        init();
+    </script>
+</body>
+</html>
